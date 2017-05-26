@@ -60,6 +60,39 @@ func (sl *StoppableListener) Accept() (net.Conn, error) {
 	}
 }
 
+func (sl *StoppableListener) AcceptTCP() (*net.TCPConn, error) {
+
+        for {
+                //Wait up to one second for a new connection
+                sl.SetDeadline(time.Now().Add(time.Second))
+
+                newConn, err := sl.TCPListener.AcceptTCP()
+
+                //Check for the channel being closed
+                select {
+                case <-sl.stop:
+                        if err == nil {
+                                newConn.Close()
+                        }
+                        return nil, StoppedError
+                default:
+                        //If the channel is still open, continue as normal
+                }
+
+                if err != nil {
+                        netErr, ok := err.(net.Error)
+
+                        //If this is a timeout, then continue to wait for
+                        //new connections
+                        if ok && netErr.Timeout() && netErr.Temporary() {
+                                continue
+                        }
+                }
+
+                return newConn, err
+        }
+}
+
 func (sl *StoppableListener) Stop() {
 	close(sl.stop)
 }
