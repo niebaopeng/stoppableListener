@@ -3,12 +3,14 @@ package stoppableListener
 import (
 	"errors"
 	"net"
+	"sync"
 	"time"
 )
 
 type StoppableListener struct {
 	*net.TCPListener          //Wrapped listener
 	stop             chan int //Channel used only to indicate listener should shutdown
+	mutex            sync.Mutex
 }
 
 func New(l net.Listener) (*StoppableListener, error) {
@@ -28,7 +30,8 @@ func New(l net.Listener) (*StoppableListener, error) {
 var StoppedError = errors.New("Listener stopped")
 
 func (sl *StoppableListener) Accept() (net.Conn, error) {
-
+	sl.mutex.Lock()
+	defer sl.mutex.Unlock()
 	for {
 		//Wait up to one second for a new connection
 		sl.SetDeadline(time.Now().Add(time.Second))
@@ -39,8 +42,8 @@ func (sl *StoppableListener) Accept() (net.Conn, error) {
 		select {
 		case <-sl.stop:
 			if err == nil {
-        			newConn.Close()
-    			}
+				newConn.Close()
+			}
 			return nil, StoppedError
 		default:
 			//If the channel is still open, continue as normal
@@ -61,38 +64,48 @@ func (sl *StoppableListener) Accept() (net.Conn, error) {
 }
 
 func (sl *StoppableListener) AcceptTCP() (*net.TCPConn, error) {
+	sl.mutex.Lock()
+	defer sl.mutex.Unlock()
+	for {
+		//Wait up to one second for a new connection
+		sl.SetDeadline(time.Now().Add(time.Second))
 
-        for {
-                //Wait up to one second for a new connection
-                sl.SetDeadline(time.Now().Add(time.Second))
+		newConn, err := sl.TCPListener.AcceptTCP()
 
-                newConn, err := sl.TCPListener.AcceptTCP()
+		//Check for the channel being closed
+		select {
+		case <-sl.stop:
+			if err == nil {
+				newConn.Close()
+			}
+			return nil, StoppedError
+		default:
+			//If the channel is still open, continue as normal
+		}
 
-                //Check for the channel being closed
-                select {
-                case <-sl.stop:
-                        if err == nil {
-                                newConn.Close()
-                        }
-                        return nil, StoppedError
-                default:
-                        //If the channel is still open, continue as normal
-                }
+		if err != nil {
+			netErr, ok := err.(net.Error)
 
-                if err != nil {
-                        netErr, ok := err.(net.Error)
+			//If this is a timeout, then continue to wait for
+			//new connections
+			if ok && netErr.Timeout() && netErr.Temporary() {
+				continue
+			}
+		}
 
-                        //If this is a timeout, then continue to wait for
-                        //new connections
-                        if ok && netErr.Timeout() && netErr.Temporary() {
-                                continue
-                        }
-                }
-
-                return newConn, err
-        }
+		return newConn, err
+	}
 }
 
 func (sl *StoppableListener) Stop() {
-	close(sl.stop)
+	sl.stop <- 0
+	go func() {
+		sl.mutex.Lock()
+	}()
+}
+
+func (sl *StoppableListener) Start() {
+	go func() {
+		sl.mutex.Unlock()
+	}()
 }
